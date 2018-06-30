@@ -173,7 +173,7 @@ class NamespacedResourceReflector(LoggingConfigurable):
         update' cycle on them), we should be ok!
         """
         cur_delay = 0.1
-        self.log.info("watching for %s with label selector %s / field selector %s in namespace %s", self.kind, self.label_selector, self.field_selector, self.namespace)
+        self.log.info("CHANGED CODE watching for %s with label selector %s / field selector %s in namespace %s", self.kind, self.label_selector, self.field_selector, self.namespace)
         while True:
             w = watch.Watch()
             try:
