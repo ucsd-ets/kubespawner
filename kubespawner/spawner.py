@@ -5,18 +5,18 @@ This module exports `KubeSpawner` class, which is the actual spawner
 implementation that should be used by JupyterHub.
 """
 
-from functools import partial
+from functools import partial  # noqa
 import os
+import sys
 import string
 from urllib.parse import urlparse, urlunparse
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
-import warnings
 
 from tornado import gen
 from tornado.ioloop import IOLoop
 from tornado.concurrent import run_on_executor
-from traitlets import Any, Unicode, List, Integer, Union, Dict, Bool, Any, observe
+from traitlets import Any, Unicode, List, Integer, Union, Dict, Bool, Any, validate
 from jupyterhub.spawner import Spawner
 from jupyterhub.utils import exponential_backoff
 from jupyterhub.traitlets import Command
@@ -73,7 +73,14 @@ class KubeSpawner(Spawner):
     pod_reflector = None
 
     def __init__(self, *args, **kwargs):
+        _mock = kwargs.pop('_mock', False)
         super().__init__(*args, **kwargs)
+
+        if _mock:
+            # if testing, skip the rest of initialization
+            # FIXME: rework initialization for easier mocking
+            return
+
         # By now, all the traitlets have been set, so we can use them to compute
         # other attributes
         if self.__class__.executor is None:
@@ -125,6 +132,17 @@ class KubeSpawner(Spawner):
         Defaults to `5 * cpu_cores`, which is the default for `ThreadPoolExecutor`.
         """
     )
+
+    events_enabled = Bool(
+        True,
+        config=True,
+        help="""
+        Enable event-watching for progress-reports to the user spawn page.
+
+        Disable if these events are not desirable
+        or to save some performance cost.
+        """
+        )
 
     namespace = Unicode(
         config=True,
@@ -896,20 +914,21 @@ class KubeSpawner(Spawner):
         """
     )
 
-    profile_list = List(
-        trait=Dict(),
-        default_value=None,
-        minlen=0,
+    profile_list = Union([
+            List(trait=Dict()),
+            Callable()
+        ],
         config=True,
         help="""
         List of profiles to offer for selection by the user.
 
         Signature is: List(Dict()), where each item is a dictionary that has two keys:
+
         - 'display_name': the human readable display name (should be HTML safe)
         - 'description': Optional description of this profile displayed to the user.
         - 'kubespawner_override': a dictionary with overrides to apply to the KubeSpawner
-            settings. Each value can be either the final value to change or a callable that
-            take the `KubeSpawner` instance as parameter and return the final value.
+          settings. Each value can be either the final value to change or a callable that
+          take the `KubeSpawner` instance as parameter and return the final value.
         - 'default': (optional Bool) True if this is the default selected option
 
         Example::
@@ -954,6 +973,13 @@ class KubeSpawner(Spawner):
                     }
                 }
             ]
+
+        Instead of a list of dictionaries, this could also be a callable that takes as one
+        parameter the current spawner instance and returns a list of dictionaries. The
+        callable will be called asynchronously if it returns a future, rather than
+        a list. Note that the interface of the spawner class is not deemed stable
+        across versions, so using this functionality might cause your JupyterHub
+        or kubespawner upgrades to break.
         """
     )
 
@@ -982,40 +1008,89 @@ class KubeSpawner(Spawner):
         "user_storage_extra_labels",
         "user_storage_access_modes",
     ]
-    # define Any traits for deprecated names
-    # so we can propagate their values to the new traits
+
+    @validate('config')
+    def _handle_deprecated_config(self, proposal):
+        config = proposal.value
+        if 'KubeSpawner' not in config:
+            # nothing to check
+            return config
+        for _deprecated_name in self._deprecated_traits:
+            # for any `singleuser_name` deprecate in favor of `name`
+            _new_name = _deprecated_name.split('_', 1)[1]
+            if _deprecated_name not in config.KubeSpawner:
+                # nothing to do
+                continue
+
+            # remove deprecated value from config
+            _deprecated_value = config.KubeSpawner.pop(_deprecated_name)
+            self.log.warning(
+                "KubeSpawner.%s is deprecated in 0.9. Use KubeSpawner.%s instead",
+                _deprecated_name,
+                _new_name,
+            )
+            if _new_name in config.KubeSpawner:
+                # *both* config values found,
+                # ignore deprecated config and warn about the collision
+                _new_value = config.KubeSpawner[_new_name]
+                # ignore deprecated config in favor of non-deprecated config
+                self.log.warning(
+                    "Ignoring deprecated config KubeSpawner.%s = %r "
+                    " in favor of KubeSpawner.%s = %r",
+                    _deprecated_name,
+                    _deprecated_value,
+                    _new_name,
+                    _new_value,
+                )
+            else:
+                # move deprecated config to its new home
+                config.KubeSpawner[_new_name] = _deprecated_value
+
+        return config
+
+    # define properties for deprecated names
+    # so we can propagate their values to the new traits.
+    # most deprecations should be handled via config above,
+    # but in case these are set at runtime, e.g. by subclasses
+    # or hooks, hook this up.
+    # The signature-order of these is funny
+    # because the property methods are created with
+    # functools.partial(f, name) so name is passed as the first arg
+    # before self.
+
+    def _get_deprecated(name, self):
+        _new_name = name.split('_', 1)[1]
+        # warn about the deprecated name
+        self.log.warning(
+            "KubeSpawner.%s is deprecated in 0.9. Use KubeSpawner.%s", name, _new_name
+        )
+        return getattr(self, _new_name)
+
+    def _set_deprecated(name, self, value):
+        _new_name = name.split('_', 1)[1]
+        # warn about the deprecated name
+        self.log.warning(
+            "KubeSpawner.%s is deprecated in 0.9. Use KubeSpawner.%s", name, _new_name
+        )
+        return setattr(self, _new_name, value)
+
     for _deprecated_name in _deprecated_traits:
-        _new_name = _deprecated_name.split('_', 1)[1]
         exec(
-            "{} = Any(config=True, help='DEPRECATED. Use {}.')".format(
-                _deprecated_name, _new_name
+            """{} = property(
+                partial(_get_deprecated, _deprecated_name),
+                partial(_set_deprecated, _deprecated_name),
+            )
+            """.format(
+                _deprecated_name
             )
         )
-    del _deprecated_name, _new_name
+    del _deprecated_name
 
-    @observe(*_deprecated_traits)
-    def _deprecated_trait_changed(self, change):
-        """Warn on use of deprecated config traits
-
-        preserving behavior by propagating values to the new name
-        """
-        # new name without prefix:
-        _new_name = change.name.split('_', 1)[1]
-        # warn about the deprecated name
-        warnings.warn(
-            "KubeSpawner.{} is deprecated in 0.9. Use KubeSpawner.{}".format(
-                change.name, _new_name,
-            ),
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # assign to the real attribute
-        setattr(self, _new_name, change.new)
-
-    events = Any(help="The event reflector object when it is created.")
+    event_reflector = Any(help="The event reflector object when it is created.")
 
     def _expand_user_properties(self, template):
         # Make sure username and servername match the restrictions for DNS labels
+        # Note: '-' is not in safe_chars, as it is being used as escape character
         safe_chars = set(string.ascii_lowercase + string.digits)
 
         # Set servername based on whether named-server initialised
@@ -1029,6 +1104,7 @@ class KubeSpawner(Spawner):
         return template.format(
             userid=self.user.id,
             username=safe_username,
+            unescaped_username=self.user.name,
             legacy_escape_username=legacy_escaped_username,
             servername=servername
             )
@@ -1255,16 +1331,22 @@ class KubeSpawner(Spawner):
 
     @async_generator
     async def progress(self):
+        if not self.events_enabled:
+            return
         next_event = 0
         self.log.debug('progress generator: %s', self.pod_name)
 
         pod_id = None
         first_run = True
-        while self.events and (first_run or not self.events.stopped()):
+        event_reflector = self.event_reflector
+        if not event_reflector:
+            self.log.warning("No event reflector for %s", self.pod_name)
+            return
+        while first_run or not event_reflector.stopped():
             # run at least once, so we get events that are already waiting,
             # even if we've stopped waiting for new events
             first_run = False
-            events = self.events.events
+            events = event_reflector.events
             len_events = len(events)
             if next_event < len_events:
                 # only show messages for the 'current' pod
@@ -1288,22 +1370,35 @@ class KubeSpawner(Spawner):
     def _start_watching_events(self):
         """Start watching for pod events for our pod"""
         # clear previous events reflector
-        if self.events and not self.events.stopped():
-            self.events.stop()
-
+        if self.event_reflector and not self.event_reflector.stopped():
+            self.event_reflector.stop()
 
         # This will include events for any previous launch of pods with our name
-        self.events = EventReflector(
-            parent=self, namespace=self.namespace,
+        self.event_reflector = EventReflector(
+            parent=self,
+            namespace=self.namespace,
             fields={"involvedObject.kind": "Pod", "involvedObject.name": self.pod_name},
         )
+        return self.event_reflector
 
     @gen.coroutine
     def start(self):
-        self._start_watching_events()
+        if self.events_enabled:
+            event_reflector = self._start_watching_events()
+        else:
+            event_reflector = None
 
         if self.storage_pvc_ensure:
+            # Try and create the pvc. If it succeeds we are good. If
+            # returns a 409 indicating it already exists we are good. If
+            # it returns a 403, indicating potential quota issue we need
+            # to see if pvc already exists before we decide to raise the
+            # error for quota being exceeded. This is because quota is
+            # checked before determining if the PVC needed to be
+            # created.
+
             pvc = self.get_pvc_manifest()
+
             try:
                 yield self.asynchronize(
                     self.api.create_namespaced_persistent_volume_claim,
@@ -1313,6 +1408,21 @@ class KubeSpawner(Spawner):
             except ApiException as e:
                 if e.status == 409:
                     self.log.info("PVC " + self.pvc_name + " already exists, so did not create new pvc.")
+
+                elif e.status == 403:
+                    t, v, tb = sys.exc_info()
+
+                    try:
+                        yield self.asynchronize(
+                            self.api.read_namespaced_persistent_volume_claim,
+                            name=self.pvc_name,
+                            namespace=self.namespace)
+
+                    except ApiException as e:
+                        raise v.with_traceback(tb)
+
+                    self.log.info("PVC " + self.pvc_name + " already exists, possibly have reached quota though.")
+
                 else:
                     raise
 
@@ -1356,21 +1466,31 @@ class KubeSpawner(Spawner):
         )
 
         pod = self.pod_reflector.pods[self.pod_name]
+        if event_reflector:
+            self.log.debug(
+                'pod %s events before launch: %s',
+                self.pod_name,
+                "\n".join(
+                    [
+                        "%s [%s] %s" % (event.last_timestamp, event.type, event.message)
+                        for event in event_reflector.events
+                    ]
+                ),
+            )
 
-        self.log.debug('pod %s events before launch: %s',
-            self.pod_name, "\n".join(["%s [%s] %s" % (event.last_timestamp, event.type, event.message) for event in self.events.events]))
-
-        # Note: we stop the event watcher once launch is successful, but the reflector
-        # will only stop when the next event comes in, likely when it is stopped.
-        self.events.stop()
+            # Note: we stop the event watcher once launch is successful, but the reflector
+            # will only stop when the next event comes in, likely when it is stopped.
+            if not event_reflector.stopped():
+                event_reflector.stop()
         return (pod.status.pod_ip, self.port)
 
     @gen.coroutine
     def stop(self, now=False):
-        if self.events:
-            if not self.events.stopped():
-                self.events.stop()
-            self.events = None
+        if self.event_reflector:
+            if not self.event_reflector.stopped():
+                self.event_reflector.stop()
+            self.event_reflector = None
+
         delete_options = client.V1DeleteOptions()
 
         if now:
@@ -1382,13 +1502,22 @@ class KubeSpawner(Spawner):
 
         delete_options.grace_period_seconds = grace_seconds
         self.log.info("Deleting pod %s", self.pod_name)
-        yield self.asynchronize(
-            self.api.delete_namespaced_pod,
-            name=self.pod_name,
-            namespace=self.namespace,
-            body=delete_options,
-            grace_period_seconds=grace_seconds
-        )
+        try:
+            yield self.asynchronize(
+                self.api.delete_namespaced_pod,
+                name=self.pod_name,
+                namespace=self.namespace,
+                body=delete_options,
+                grace_period_seconds=grace_seconds,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                self.log.warning(
+                    "No pod %s to delete. Assuming already deleted.",
+                    self.pod_name,
+                )
+            else:
+                raise
         yield exponential_backoff(
             lambda: self.pod_reflector.pods.get(self.pod_name, None) is None,
             'pod/%s did not disappear in %s seconds!' % (self.pod_name, self.start_timeout),
@@ -1413,6 +1542,16 @@ class KubeSpawner(Spawner):
                 break
         return args
 
+    def _render_options_form(self, profile_list):
+        self._profile_list = profile_list
+        profile_form_template = Environment(loader=BaseLoader).from_string(self.profile_form_template)
+        return profile_form_template.render(profile_list=profile_list)
+
+    @gen.coroutine
+    def _render_options_form_dynamically(self, current_spawner):
+        profile_list = yield gen.maybe_future(self.profile_list(current_spawner))
+        return self._render_options_form(profile_list)
+
     def _options_form_default(self):
         '''
         Build the form template according to the `profile_list` setting.
@@ -1423,8 +1562,10 @@ class KubeSpawner(Spawner):
         '''
         if not self.profile_list:
             return ''
-        profile_form_template = Environment(loader=BaseLoader).from_string(self.profile_form_template)
-        return profile_form_template.render(profile_list=self.profile_list)
+        if callable(self.profile_list):
+            return self._render_options_form_dynamically
+        else:
+            return self._render_options_form(self.profile_list)
 
     def options_from_form(self, formdata):
         """get the option selected by the user on the form
@@ -1448,12 +1589,11 @@ class KubeSpawner(Spawner):
         Returns:
             the selected user option
         """
-
-        if not self.profile_list:
+        if not self.profile_list or not hasattr(self, '_profile_list'):
             return formdata
         # Default to first profile if somehow none is provided
         selected_profile = int(formdata.get('profile', [0])[0])
-        options = self.profile_list[selected_profile]
+        options = self._profile_list[selected_profile]
         self.log.debug("Applying KubeSpawner override for profile '%s'", options['display_name'])
         kubespawner_override = options.get('kubespawner_override', {})
         for k, v in kubespawner_override.items():

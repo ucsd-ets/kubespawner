@@ -4,6 +4,7 @@ Helper methods for generating k8s API objects.
 import json
 from urllib.parse import urlparse
 import escapism
+import re
 import string
 
 from kubernetes.client.models import (
@@ -187,31 +188,15 @@ def make_pod(
         args=cmd,
         image_pull_policy=image_pull_policy,
         lifecycle=lifecycle_hooks,
-        resources=V1ResourceRequirements()
+        resources=V1ResourceRequirements(),
+        volume_mounts=volume_mounts
     )
 
     if service_account is None:
-        # Add a hack to ensure that no service accounts are mounted in spawned pods
-        # This makes sure that we don"t accidentally give access to the whole
+        # This makes sure that we don't accidentally give access to the whole
         # kubernetes API to the users in the spawned pods.
-        # Note: We don't simply use `automountServiceAccountToken` here since we wanna be compatible
-        # with older kubernetes versions too for now.
-        hack_volume = V1Volume(name='no-api-access-please', empty_dir={})
-        hack_volumes = [hack_volume]
-
-        hack_volume_mount = V1VolumeMount(
-            name='no-api-access-please',
-            mount_path="/var/run/secrets/kubernetes.io/serviceaccount",
-            read_only=True
-        )
-        hack_volume_mounts = [hack_volume_mount]
-
-        # Non-hacky way of not mounting service accounts
         pod.spec.automount_service_account_token = False
     else:
-        hack_volumes = []
-        hack_volume_mounts = []
-
         pod.spec.service_account_name = service_account
 
     if run_privileged:
@@ -220,7 +205,6 @@ def make_pod(
         )
 
     notebook_container.resources.requests = {}
-
     if cpu_guarantee:
         notebook_container.resources.requests['cpu'] = cpu_guarantee
     if mem_guarantee:
@@ -238,7 +222,6 @@ def make_pod(
         for k in extra_resource_limits:
             notebook_container.resources.limits[k] = extra_resource_limits[k]
 
-    notebook_container.volume_mounts = volume_mounts + hack_volume_mounts
     pod.spec.containers.append(notebook_container)
 
     if extra_container_config:
@@ -251,7 +234,7 @@ def make_pod(
         pod.spec.containers.extend(extra_containers)
 
     pod.spec.init_containers = init_containers
-    pod.spec.volumes = volumes + hack_volumes
+    pod.spec.volumes = volumes
 
     if scheduler_name:
         pod.spec.scheduler_name = scheduler_name
@@ -347,26 +330,45 @@ def make_ingress(
     target_ip = target_parts.hostname
     target_port = target_parts.port
 
+    target_is_ip = re.match('^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', target_ip) is not None
+
     # Make endpoint object
-    endpoint = V1Endpoints(
-        kind='Endpoints',
-        metadata=meta,
-        subsets=[
-            V1EndpointSubset(
-                addresses=[V1EndpointAddress(ip=target_ip)],
-                ports=[V1EndpointPort(port=target_port)]
-            )
-        ]
-    )
+    if target_is_ip:
+        endpoint = V1Endpoints(
+            kind='Endpoints',
+            metadata=meta,
+            subsets=[
+                V1EndpointSubset(
+                    addresses=[V1EndpointAddress(ip=target_ip)],
+                    ports=[V1EndpointPort(port=target_port)]
+                )
+            ]
+        )
+    else:
+        endpoint = None
 
     # Make service object
-    service = V1Service(
-        kind='Service',
-        metadata=meta,
-        spec=V1ServiceSpec(
-            ports=[V1ServicePort(port=target_port, target_port=target_port)]
+    if target_is_ip:
+        service = V1Service(
+            kind='Service',
+            metadata=meta,
+            spec=V1ServiceSpec(
+                type='ClusterIP',
+                external_name='',
+                ports=[V1ServicePort(port=target_port, target_port=target_port)]
+            )
         )
-    )
+    else:
+        service = V1Service(
+            kind='Service',
+            metadata=meta,
+            spec=V1ServiceSpec(
+                type='ExternalName',
+                external_name=target_ip,
+                cluster_ip='',
+                ports=[V1ServicePort(port=target_port, target_port=target_port)],
+            ),
+        )
 
     # Make Ingress object
     ingress = V1beta1Ingress(
