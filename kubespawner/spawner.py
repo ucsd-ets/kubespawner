@@ -1607,7 +1607,8 @@ class KubeSpawner(Spawner):
         if not self.profile_list:
             return ''
         if callable(self.profile_list):
-            return self._render_options_form_dynamically()
+            c=yield self._render_options_form_dynamically()
+            return c
         else:
             return self._render_options_form(self.profile_list)
 
