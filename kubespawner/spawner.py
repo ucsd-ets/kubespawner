@@ -1607,10 +1607,8 @@ class KubeSpawner(Spawner):
         if not self.profile_list:
             return ''
         if callable(self.profile_list):
-            # HACK: call profile_list fn directly rather than via coroutine
-            # until I figure out how the Tornado route's supposed to work
-            # callable MUST be quick & non-blocking - e.g. local files only, no webservices
-            return self._render_options_form(self.profile_list(self))
+            profile_list=yield self.profile_list()
+            return self._render_options_form(profile_list)
         else:
             return self._render_options_form(self.profile_list)
 
