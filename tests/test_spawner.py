@@ -24,6 +24,7 @@ class MockUser(Mock):
     def url(self):
         return self.server.url
 
+
 def test_deprecated_config():
     """Deprecated config is handled correctly"""
     with pytest.warns(DeprecationWarning):
@@ -33,7 +34,8 @@ def test_deprecated_config():
         c.KubeSpawner.fs_gid = 10
         # only deprecated set, should still work
         c.KubeSpawner.hub_connect_ip = '10.0.1.1'
-        c.KubeSpawner.singleuser_extra_pod_config = extra_pod_config = {"key": "value"}
+        c.KubeSpawner.singleuser_extra_pod_config = extra_pod_config = {
+            "key": "value"}
         c.KubeSpawner.image_spec = 'abc:123'
         c.KubeSpawner.image_pull_secrets = 'k8s-secret-a'
         spawner = KubeSpawner(hub=Hub(), config=c, _mock=True)
@@ -129,7 +131,8 @@ async def test_spawn(kube_ns, kube_client, config):
 
 @pytest.mark.asyncio
 async def test_spawn_progress(kube_ns, kube_client, config):
-    spawner = KubeSpawner(hub=Hub(), user=MockUser(name="progress"), config=config)
+    spawner = KubeSpawner(hub=Hub(), user=MockUser(
+        name="progress"), config=config)
     # empty spawner isn't running
     status = await spawner.poll()
     assert isinstance(status, int)
@@ -201,7 +204,7 @@ _test_profiles = [
             'image': 'training/python:label',
             'cpu_limit': 1,
             'mem_limit': 512 * 1024 * 1024,
-            }
+        }
     },
     {
         'display_name': 'Training Env - Datascience',
@@ -210,7 +213,7 @@ _test_profiles = [
             'image': 'training/datascience:label',
             'cpu_limit': 4,
             'mem_limit': 8 * 1024 * 1024 * 1024,
-            }
+        }
     },
 ]
 
@@ -221,7 +224,8 @@ async def test_user_options_set_from_form():
     spawner.profile_list = _test_profiles
     # render the form
     await spawner.get_options_form()
-    spawner.user_options = spawner.options_from_form({'profile': [_test_profiles[1]['slug']]})
+    spawner.user_options = spawner.options_from_form(
+        {'profile': [_test_profiles[1]['slug']]})
     assert spawner.user_options == {
         'profile': _test_profiles[1]['slug'],
     }
@@ -350,4 +354,3 @@ def test_spawner_can_use_list_of_image_pull_secrets():
     c.KubeSpawner.image_pull_secrets = secrets
     spawner = KubeSpawner(hub=Hub(), config=c, _mock=True)
     assert spawner.image_pull_secrets == secrets
-
